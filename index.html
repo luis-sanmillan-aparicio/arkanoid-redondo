@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Arkanoid redondo</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ---------- Mundo lógico: círculo de 1000 x 1000 ----------
+const LOG = 1000;
+const CX = LOG / 2, CY = LOG / 2;          // centro
+const R_EXT = LOG / 2;                     // borde exterior: tocarlo quita una vida
+const POR_LADO = 10;
+const NUM = POR_LADO * 4;                  // 40 ladrillos en anillo
+const ANG = 2 * Math.PI / NUM;             // ángulo de cada ladrillo
+const M = 30;                              // margen entre el borde y los ladrillos
+const HB = 45;                             // grosor del ladrillo
+const R_OUT = R_EXT - M;                   // radio exterior del anillo de ladrillos
+const R_IN = R_OUT - HB;                   // radio interior del anillo de ladrillos
+const R_MED = (R_IN + R_OUT) / 2;
+const LB = ANG * R_MED;                    // largo aproximado del ladrillo
+
+const GAP = 12;                            // separación paleta-ladrillos
+const PH = 22;                             // grosor de la paleta
+const R_P_OUT = R_IN - GAP;                // radio exterior de la paleta
+const R_P_IN = R_P_OUT - PH;               // radio interior de la paleta
+const RP = (R_P_IN + R_P_OUT) / 2;         // radio medio de la paleta
+const PL = 187;                            // largo de la paleta (como en el cuadrado: 850 * 0,22)
+const VUELTA_PANTALLA = 0.5;               // 1/2 del ancho de pantalla = una vuelta entera
+
+const R_PUNTO_MIN = PL / 4;                // punto central: tamaño original (diámetro = media paleta)
+const R_PUNTO_MAX = PL / 2;                // ...y tamaño máximo (diámetro = una paleta entera)
+const SEG_CICLO_PUNTO = 60;                // ciclo completo (crece y decrece) en 1 minuto de juego
+let R_PUNTO = R_PUNTO_MIN;                 // radio actual: oscila entre ambos
+const R_BOLA = 10;
+const V_BASE = 315;                        // velocidad inicial de la bola (unidades/segundo)
+let V = V_BASE;                            // velocidad actual de la bola
+const KMH_INICIO = 50;                     // el marcador empieza en 50 km/h
+const SEG_ACELERACION = 1;                 // cada segundo...
+const FACTOR_ACELERACION = Math.pow(1.4, 1 / 300); // ...x1,001122 (compuesto: +40 % cada 5 minutos)
+const VIDAS_INICIO = 3;
+const VIDAS_MAX = 10;
+const TOQUES_PARA_VIDA = 3;                // cada 3 toques en el centro sale algo: vida, muerte, vida, muerte...
+const R_CORAZON = 16;                      // radio de recogida del corazón
+const SEPARACION_CALAVERAS = 40 * Math.PI / 180; // las dos calaveras salen con más de 40° entre sus trayectorias
+const FACTOR_PALETA_GRANDE = 2;            // el regalo hace crecer la paleta el doble...
+const DURACION_PALETA_GRANDE = 90;         // ...durante 1 minuto y medio (segundos de juego)
+const DURACION_RAYO = 0.6;
+const DURACION_AVISO = 2;                  // segundos que se ve un cartel
+const NUM_ARANAS = 8;
+const SEPARACION_ARANAS = 15 * Math.PI / 180;
+const ESPERA_ARANAS = 4;                   // segundos paradas a mitad de camino
+const R_ARANA = 16;
+const DURACION_DANO = 60;                  // la paleta dañada tarda 1 minuto en recuperarse
+const NUM_BOLAS_FUEGO = 3;
+const SEPARACION_FUEGO = 30 * Math.PI / 180; // más de 30° entre cada par
+const V_FUEGO = 660;
+const R_FUEGO = 10;
+const MAX_PRENDER = 3;       // ladrillos que puede prender cada bola (el golpeado incluido)
+const DURACION_ARDER = 5;    // segundos hasta que el ladrillo se rompe
+const CONTAGIO_CADA = 2;     // segundos entre contagios
+const REPETICIONES_CICLO = 1;              // cada tipo sale 1 vez por ciclo, en orden sorteado
+
+// ---------- Estado ----------
+let ang = Math.PI / 2;  // ángulo del centro de la paleta (continuo, sin límites). π/2 = abajo
+let vidas = VIDAS_INICIO;
+let toquesCentro = 0;
+let tiempo = 0;       // segundos jugados
+let corazonesVida = [];  // objetos que salen del centro: { tipo: 'vida' | 'calavera' | ... }
+let salidas = 0;
+let bolsa = [];          // salidas que quedan del ciclo actual, ya barajadas
+let calaveraCentro = false;
+let paletaGrande = false;
+let tiempoPaleta = 0;
+let aviso = null;           // cartel temporal: { texto, color, vida }
+let aranaCentro = false;
+let aranas = [];
+let fuegoCentro = false;
+let bolasFuego = [];
+let dano = null;       // { t, ini, fin }: tramo que conserva de la paleta, en fracción del largo (1 = entera, 0,5 = mitad, 0,25 = mínimo)
+let estado = 'inicio'; // 'inicio' | 'espera' | 'juego' | 'fin'
+let espera = 0;
+let bx = 0, by = 0, vx = 0, vy = 0;
+let rayo = null;
+let ladrillos = [];
+
+// ---------- Pantalla ----------
+let W = 0, H = 0, S = 0, ox = 0, oy = 0, esc = 1;
+let hud = { modo: 'arriba', x: 0, y: 0, w: 0, h: 0 }; // zona del marcador (siempre fuera del círculo)
+
+function crearLadrillos() {
+  const lista = [];
+  for (let k = 0; k < NUM; k++) {
+    const a0 = -Math.PI / 2 + k * ANG;      // empieza arriba y avanza en sentido horario
+    const am = a0 + ANG / 2;
+    const horiz = Math.abs(Math.sin(am)) > Math.abs(Math.cos(am));
+    const w = horiz ? LB : HB, h = horiz ? HB : LB;
+    const mx = CX + Math.cos(am) * R_MED, my = CY + Math.sin(am) * R_MED;
+    lista.push({
+      a0: a0, a1: a0 + ANG, am: am, ah: ANG / 2,       // sector del ladrillo
+      x: mx - w / 2, y: my - h / 2, w: w, h: h,        // caja (solo para dibujar las llamas)
+      hue: (k * 360) / NUM,
+      vivo: true, flash: 0, muerte: 0,
+      arde: 0, contagio: 0, origen: null, llamas: null, semilla: Math.random() * 1000
+    });
+  }
+  return lista;
+}
+
+function ajustar() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (H >= W) {
+    // Vertical: banda del marcador arriba y el círculo debajo
+    const banda = clamp(H * 0.09, 44, 90);
+    S = Math.min(W, H - banda);
+    ox = (W - S) / 2;
+    oy = banda + (H - banda - S) / 2;
+    hud = { modo: 'arriba', x: ox, y: 0, w: S, h: oy };
+  } else {
+    // Horizontal: panel del marcador a la izquierda y el círculo a la derecha
+    const panel = clamp(W * 0.16, 120, 220);
+    S = Math.min(H, W - panel);
+    ox = panel + (W - panel - S) / 2;
+    oy = (H - S) / 2;
+    hud = { modo: 'lado', x: 0, y: 0, w: ox, h: H };
+  }
+  esc = S / LOG;
+}
+
+// ---------- Geometría ----------
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+// Diferencia de ángulos normalizada a [-π, π]
+function angDif(a, b) {
+  const d = a - b;
+  return ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+}
+
+// Punto del sector anular (radios ri..ro, centro angular m, semiancho h) más cercano a (px, py)
+function puntoSector(px, py, ri, ro, m, h) {
+  const dx = px - CX, dy = py - CY;
+  const d = Math.hypot(dx, dy);
+  const t = Math.atan2(dy, dx);
+  const dl = angDif(t, m);
+  if (Math.abs(dl) <= h) {
+    const r = clamp(d, ri, ro);
+    return { x: CX + Math.cos(t) * r, y: CY + Math.sin(t) * r };
+  }
+  const e = m + (dl > 0 ? h : -h);
+  const ux = Math.cos(e), uy = Math.sin(e);
+  const s = clamp(dx * ux + dy * uy, ri, ro);
+  return { x: CX + ux * s, y: CY + uy * s };
+}
+
+function circuloContraSector(cx, cy, r, ri, ro, m, h) {
+  const q = puntoSector(cx, cy, ri, ro, m, h);
+  const dx = cx - q.x, dy = cy - q.y;
+  return { choca: dx * dx + dy * dy < r * r, dx: dx, dy: dy };
+}
+
+function chocaLadrillo(x, y, r, b) {
+  return circuloContraSector(x, y, r, R_IN, R_OUT, b.am, b.ah);
+}
+
+// ---------- Paleta ----------
+function largoPaleta() { return paletaGrande ? PL * FACTOR_PALETA_GRANDE : PL; }
+
+function cambiarPaleta(grande) { paletaGrande = grande; }
+
+// Sector que ocupa la paleta ahora mismo (si está dañada, solo el tramo que conserva)
+function paleta() {
+  const hw = largoPaleta() / (2 * RP);
+  let a0 = ang - hw, a1 = ang + hw;
+  if (dano) {
+    a0 = ang - hw + dano.ini * 2 * hw;
+    a1 = ang - hw + dano.fin * 2 * hw;
+  }
+  return { a0: a0, a1: a1, m: (a0 + a1) / 2, h: (a1 - a0) / 2, dano: !!dano };
+}
+
+function tocaPaleta(x, y, r) {
+  const p = paleta();
+  return circuloContraSector(x, y, r, R_P_IN, R_P_OUT, p.m, p.h).choca;
+}
+
+// ---------- Juego ----------
+function prepararBola() {
+  bx = CX;
+  by = CY + R_PUNTO + R_BOLA + 1;
+  vx = 0;
+  vy = 0;
+  estado = 'espera';
+  espera = 0.9;
+}
+
+function lanzarBola() {
+  let a = (Math.random() * 2 - 1) * 0.35;
+  if (Math.abs(a) < 0.1) a = a < 0 ? -0.1 : 0.1;
+  vx = V * Math.sin(a);
+  vy = V * Math.cos(a); // hacia abajo
+  estado = 'juego';
+}
+
+function reiniciar() {
+  ladrillos = crearLadrillos();
+  vidas = VIDAS_INICIO;
+  toquesCentro = 0;
+  tiempo = 0;
+  V = V_BASE;
+  R_PUNTO = R_PUNTO_MIN;
+  corazonesVida = [];
+  salidas = 0;
+  bolsa = [];
+  calaveraCentro = false;
+  aranaCentro = false;
+  aranas = [];
+  fuegoCentro = false; bolasFuego = [];
+  dano = null;
+  paletaGrande = false;
+  tiempoPaleta = 0;
+  aviso = null;
+  rayo = null;
+  prepararBola();
+}
+
+function mostrarAviso(texto, color) {
+  aviso = { texto: texto, color: color, vida: DURACION_AVISO };
+}
+
+function perderVida() {
+  vidas--;
+  rayo = null;
+  mostrarAviso('Bola fuera', '#fff');
+  if (vidas <= 0) {
+    estado = 'fin';
+  } else {
+    prepararBola();
+  }
+}
+
+const SEMI_RAYO = (40 / 2) * Math.PI / 180; // cono de 40 grados
+const LARGO_RAYO = 720; // mayor que el radio: se recorta en el borde del círculo
+
+function conoToca(b, a0) {
+  return Math.abs(angDif(b.am, a0)) <= SEMI_RAYO + b.ah;
+}
+
+function lanzarRayo(nx, ny, mortal) {
+  // Cono que sale del centro hacia el lado contrario al golpe
+  const a0 = Math.atan2(-ny, -nx);
+  ladrillos.forEach((b) => {
+    if (!conoToca(b, a0)) return;
+    if (mortal) {
+      // Con calavera: mata todos los ladrillos vivos del sector
+      if (b.vivo) {
+        b.vivo = false;
+        b.arde = 0;
+        b.muerte = 0.6;
+      }
+    } else if (!b.vivo) {
+      // Sin calavera: cura los que faltan
+      b.vivo = true;
+      b.flash = 0.6;
+    } else if (b.arde) {
+      // El rayo curativo apaga el fuego
+      b.arde = 0;
+      b.flash = 0.6;
+    }
+  });
+  rayo = { a0: a0, vida: DURACION_RAYO, mortal: mortal };
+}
+
+function colisiones() {
+  const dC = Math.hypot(bx - CX, by - CY);
+
+  // 1) Tocar el borde del círculo: pierdes una vida
+  if (dC + R_BOLA >= R_EXT) {
+    perderVida();
+    return;
+  }
+
+  // 2) Punto central: rebota y lanza el rayo
+  {
+    const dx = bx - CX, dy = by - CY;
+    const d = dC;
+    const lim = R_PUNTO + R_BOLA;
+    if (d < lim) {
+      const nx = d > 0 ? dx / d : 0;
+      const ny = d > 0 ? dy / d : 1;
+      const vn = vx * nx + vy * ny;
+      if (vn < 0) {
+        vx -= 2 * vn * nx;
+        vy -= 2 * vn * ny;
+        if (aranaCentro) {
+          aranaCentro = false;
+          soltarAranas();
+        } else if (fuegoCentro) {
+          fuegoCentro = false;
+          soltarFuego();
+        } else {
+          const mortal = calaveraCentro;
+          calaveraCentro = false;
+          lanzarRayo(nx, ny, mortal);
+        }
+        toquesCentro++;
+        if (toquesCentro % TOQUES_PARA_VIDA === 0) lanzarCorazon();
+      }
+      bx = CX + nx * (lim + 0.01);
+      by = CY + ny * (lim + 0.01);
+    }
+  }
+
+  // 3) Paleta (arco)
+  {
+    const p = paleta();
+    const c = circuloContraSector(bx, by, R_BOLA, R_P_IN, R_P_OUT, p.m, p.h);
+    if (c.choca) {
+      const t = Math.atan2(by - CY, bx - CX);
+      const ux = Math.cos(t), uy = Math.sin(t);          // hacia fuera
+      if (vx * ux + vy * uy > 0) {                        // la bola va hacia la paleta
+        const a = clamp(angDif(t, p.m) / p.h, -1, 1) * 1.05;
+        const tx = -uy, ty = ux;                          // tangente (sentido creciente del ángulo)
+        vx = V * (-ux * Math.cos(a) + tx * Math.sin(a));
+        vy = V * (-uy * Math.cos(a) + ty * Math.sin(a));
+        const r = R_P_IN - R_BOLA - 0.01;
+        bx = CX + ux * r;
+        by = CY + uy * r;
+      }
+    }
+  }
+
+  // 4) Ladrillos: los destruye y rebota
+  const d2 = Math.hypot(bx - CX, by - CY);
+  if (d2 + R_BOLA > R_IN && d2 - R_BOLA < R_OUT) {
+    for (let i = 0; i < ladrillos.length; i++) {
+      const b = ladrillos[i];
+      if (!b.vivo) continue;
+      const c = chocaLadrillo(bx, by, R_BOLA, b);
+      if (!c.choca) continue;
+      b.vivo = false;
+      if (b.arde) { b.arde = 0; contagiar(b); }
+      const dd = Math.hypot(c.dx, c.dy);
+      const t = Math.atan2(by - CY, bx - CX);
+      const nx = dd > 1e-6 ? c.dx / dd : -Math.cos(t);
+      const ny = dd > 1e-6 ? c.dy / dd : -Math.sin(t);
+      const vn = vx * nx + vy * ny;
+      if (vn < 0) {
+        vx -= 2 * vn * nx;
+        vy -= 2 * vn * ny;
+      }
+      break;
+    }
+  }
+}
+
+function siguienteTipo() {
+  if (bolsa.length === 0) {
+    const tipos = ['vida', 'calavera', 'regalo', 'arana', 'fuego'];
+    for (let r = 0; r < REPETICIONES_CICLO; r++) bolsa.push(...tipos);
+    for (let i = bolsa.length - 1; i > 0; i--) { // barajar el orden del ciclo
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = bolsa[i]; bolsa[i] = bolsa[j]; bolsa[j] = t;
+    }
+  }
+  return bolsa.pop();
+}
+
+function lanzarCorazon() {
+  // Sale del centro en dirección aleatoria, a la mitad de velocidad de la bola
+  const tipo = siguienteTipo();
+  salidas++;
+  const cantidad = (tipo === 'calavera' || tipo === 'arana' || tipo === 'fuego') ? 4 : 1;
+  const angulos = [];
+  let intentos = 0;
+  // Cada una guarda más de 40° de separación respecto a todas las anteriores
+  while (angulos.length < cantidad && intentos++ < 1000) {
+    const a = Math.random() * Math.PI * 2;
+    const ok = angulos.every((b) => {
+      let d = Math.abs(a - b) % (Math.PI * 2);
+      if (d > Math.PI) d = Math.PI * 2 - d;
+      return d >= SEPARACION_CALAVERAS;
+    });
+    if (ok) angulos.push(a);
+  }
+  angulos.forEach((a) => {
+    corazonesVida.push({ tipo: tipo, x: CX, y: CY, vx: Math.cos(a) * V / 2, vy: Math.sin(a) * V / 2 });
+  });
+}
+
+function actualizarCorazones(dt) {
+  for (let i = corazonesVida.length - 1; i >= 0; i--) {
+    const h = corazonesVida[i];
+    h.x += h.vx * dt;
+    h.y += h.vy * dt;
+    // Desaparece al llegar al borde del círculo
+    if (Math.hypot(h.x - CX, h.y - CY) > R_EXT) {
+      corazonesVida.splice(i, 1);
+      continue;
+    }
+    // Se recoge al tocar la paleta
+    if (tocaPaleta(h.x, h.y, R_CORAZON)) {
+      if (h.tipo === 'calavera') {
+        calaveraCentro = true;
+        aranaCentro = false;
+        fuegoCentro = false;
+        mostrarAviso('Rayo mortal', '#ff3b57');
+      } else if (h.tipo === 'arana') {
+        aranaCentro = true;
+        calaveraCentro = false;
+        fuegoCentro = false;
+        mostrarAviso('Plaga de arañas', '#b57bff');
+      } else if (h.tipo === 'regalo') {
+        cambiarPaleta(true);
+        dano = null; // el regalo repara la paleta dañada
+        mostrarAviso('Paleta extra: minuto y medio', '#ffd23f');
+        tiempoPaleta = DURACION_PALETA_GRANDE; // otro regalo renueva el tiempo
+      } else if (h.tipo === 'fuego') {
+        fuegoCentro = true;
+        calaveraCentro = false;
+        aranaCentro = false;
+        mostrarAviso('Bolas de fuego', '#ff7a1a');
+      } else if (vidas < VIDAS_MAX) {
+        vidas++;
+        mostrarAviso('Vida extra', '#5dff9a');
+      } else {
+        mostrarAviso('Vidas al máximo', '#5dff9a');
+      }
+      corazonesVida.splice(i, 1);
+    }
+  }
+}
+
+function soltarAranas() {
+  const angulos = [];
+  let intentos = 0;
+  while (angulos.length < NUM_ARANAS && intentos < 1000) {
+    intentos++;
+    const a = Math.random() * Math.PI * 2;
+    const ok = angulos.every((b) => {
+      let d = Math.abs(a - b) % (Math.PI * 2);
+      if (d > Math.PI) d = Math.PI * 2 - d;
+      return d >= SEPARACION_ARANAS;
+    });
+    if (ok) angulos.push(a);
+  }
+  angulos.forEach((a) => {
+    aranas.push({
+      x: CX, y: CY, vx: Math.cos(a) * V / 2, vy: Math.sin(a) * V / 2, v: V / 2,
+      parada: R_EXT / 2, fase: 'sale', espera: ESPERA_ARANAS
+    });
+  });
+}
+
+function danarPaleta(a) {
+  const p = paleta();
+  let ini = dano ? dano.ini : 0;
+  let fin = dano ? dano.fin : 1;
+  // Cada toque quita la mitad del tramo que queda, por el lado tocado, hasta un cuarto como mínimo
+  if (fin - ini > 0.25 + 1e-6) {
+    const m = (ini + fin) / 2;
+    if (angDif(Math.atan2(a.y - CY, a.x - CX), p.m) < 0) ini = m; else fin = m;
+  }
+  // Se olvida la paleta doble: vuelve al tamaño original y empieza (o se renueva) el minuto de daño
+  cambiarPaleta(false);
+  tiempoPaleta = 0;
+  dano = { t: DURACION_DANO, ini: ini, fin: fin };
+  mostrarAviso('Paleta dañada', '#b57bff');
+}
+
+function actualizarAranas(dt) {
+  for (let i = aranas.length - 1; i >= 0; i--) {
+    const a = aranas[i];
+    if (a.fase === 'sale') {
+      a.x += a.vx * dt;
+      a.y += a.vy * dt;
+      if (Math.hypot(a.x - CX, a.y - CY) >= a.parada) a.fase = 'espera';
+    } else if (a.fase === 'espera') {
+      a.espera -= dt;
+      if (a.espera <= 0) {
+        const an = Math.random() * Math.PI * 2;
+        a.vx = Math.cos(an) * a.v;
+        a.vy = Math.sin(an) * a.v;
+        a.fase = 'va';
+      }
+    } else {
+      a.x += a.vx * dt;
+      a.y += a.vy * dt;
+      if (Math.hypot(a.x - CX, a.y - CY) > R_EXT) {
+        aranas.splice(i, 1);       // sale sin tocar la paleta
+        continue;
+      }
+      if (tocaPaleta(a.x, a.y, R_ARANA)) {
+        danarPaleta(a);
+        aranas.splice(i, 1);       // desaparece al dañar
+      }
+    }
+  }
+}
+
+function soltarFuego() {
+  const angulos = [];
+  let n = 0;
+  while (angulos.length < NUM_BOLAS_FUEGO && n++ < 1000) {
+    const a = Math.random() * Math.PI * 2;
+    if (angulos.every((b) => {
+      let d = Math.abs(a - b) % (Math.PI * 2);
+      if (d > Math.PI) d = Math.PI * 2 - d;
+      return d > SEPARACION_FUEGO;
+    })) angulos.push(a);
+  }
+  angulos.forEach((a) => bolasFuego.push({
+    x: CX, y: CY, a: a, estela: [], origen: { n: 0 },
+    vx: Math.cos(a) * V_FUEGO, vy: Math.sin(a) * V_FUEGO
+  }));
+}
+
+function prender(b, origen) {
+  if (!b.vivo || b.arde || origen.n >= MAX_PRENDER) return;
+  origen.n++;
+  b.arde = DURACION_ARDER;
+  b.contagio = CONTAGIO_CADA;
+  b.origen = origen;
+  b.llamas = crearLlamas();
+}
+
+// Los ladrillos forman un anillo: los vecinos son el anterior y el siguiente
+function contagiar(b) {
+  const k = ladrillos.indexOf(b), n = ladrillos.length;
+  prender(ladrillos[(k + 1) % n], b.origen);
+  prender(ladrillos[(k + n - 1) % n], b.origen);
+}
+
+function actualizarFuego(dt) {
+  for (let i = bolasFuego.length - 1; i >= 0; i--) {
+    const f = bolasFuego[i];
+    f.estela.push({ x: f.x, y: f.y });
+    if (f.estela.length > 14) f.estela.shift();
+    f.x += f.vx * dt;
+    f.y += f.vy * dt;
+    let fin = Math.hypot(f.x - CX, f.y - CY) > R_EXT;
+    if (!fin) {
+      for (const b of ladrillos) {
+        if (b.vivo && !b.arde && chocaLadrillo(f.x, f.y, R_FUEGO, b).choca) {
+          prender(b, f.origen);
+          fin = true;
+          break;
+        }
+      }
+    }
+    if (fin) bolasFuego.splice(i, 1);
+  }
+}
+
+function arderLadrillos(dt) {
+  ladrillos.forEach((b) => {
+    if (!b.vivo || !b.arde) return;
+    b.arde -= dt;
+    b.contagio -= dt;
+    if (b.contagio <= 0) { contagiar(b); b.contagio = CONTAGIO_CADA; }
+    if (b.arde <= 0) {
+      b.vivo = false;
+      b.arde = 0;
+      b.muerte = 0.6;
+      contagiar(b); // último contagio al morir
+    }
+  });
+}
+
+function actualizar(dt) {
+  if (aviso) {
+    aviso.vida -= dt;
+    if (aviso.vida <= 0) aviso = null;
+  }
+  ladrillos.forEach((b) => {
+    if (b.flash > 0) b.flash = Math.max(0, b.flash - dt);
+    if (b.muerte > 0) b.muerte = Math.max(0, b.muerte - dt);
+  });
+  if (rayo) {
+    rayo.vida -= dt;
+    if (rayo.vida <= 0) rayo = null;
+  }
+
+  if (estado === 'espera') {
+    espera -= dt;
+    if (espera <= 0) lanzarBola();
+    return;
+  }
+  if (estado !== 'juego') return;
+
+  actualizarCorazones(dt);
+
+  if (paletaGrande) {
+    tiempoPaleta -= dt;
+    if (tiempoPaleta <= 0) cambiarPaleta(false);
+  }
+
+  if (dano) {
+    dano.t -= dt;
+    if (dano.t <= 0) dano = null;
+  }
+  actualizarAranas(dt);
+  actualizarFuego(dt);
+  arderLadrillos(dt);
+
+  tiempo += dt;
+  // El punto central oscila entre su tamaño original y el doble: ciclo de 1 minuto
+  R_PUNTO = R_PUNTO_MIN + (R_PUNTO_MAX - R_PUNTO_MIN) * (1 - Math.cos(2 * Math.PI * tiempo / SEG_CICLO_PUNTO)) / 2;
+  // Cada segundo completo la velocidad se multiplica por 1,001122
+  const nuevaV = V_BASE * Math.pow(FACTOR_ACELERACION, Math.floor(tiempo / SEG_ACELERACION));
+  if (nuevaV !== V) {
+    const k = nuevaV / V;
+    vx *= k;
+    vy *= k;
+    V = nuevaV;
+  }
+
+  const dist = V * dt;
+  const pasos = Math.max(1, Math.ceil(dist / 4));
+  const dts = dt / pasos;
+  for (let i = 0; i < pasos; i++) {
+    bx += vx * dts;
+    by += vy * dts;
+    colisiones();
+    if (estado !== 'juego') break;
+  }
+}
+
+// ---------- Dibujo ----------
+function corazon(cx, cy, s, lleno) {
+  const t = s / 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + t * 0.9);
+  ctx.bezierCurveTo(cx - t * 1.6, cy - t * 0.2, cx - t * 0.9, cy - t * 1.3, cx, cy - t * 0.45);
+  ctx.bezierCurveTo(cx + t * 0.9, cy - t * 1.3, cx + t * 1.6, cy - t * 0.2, cx, cy + t * 0.9);
+  ctx.closePath();
+  if (lleno) {
+    ctx.fillStyle = '#ff3b57';
+    ctx.fill();
+  } else {
+    ctx.strokeStyle = '#5a2a33';
+    ctx.lineWidth = Math.max(1, s * 0.08);
+    ctx.stroke();
+  }
+}
+
+function rectRedondo(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Traza un sector anular (ladrillo); g = recorte interior para dejar hueco entre ladrillos
+function trazarSector(ri, ro, a0, a1, g) {
+  g = g || 0;
+  const ro2 = ro - g, ri2 = ri + g;
+  ctx.beginPath();
+  ctx.arc(CX, CY, ro2, a0 + g / ro2, a1 - g / ro2);
+  ctx.arc(CX, CY, ri2, a1 - g / ri2, a0 + g / ri2, true);
+  ctx.closePath();
+}
+
+function regalo(cx, cy, s) {
+  const top = cy - s * 0.35;
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillRect(cx - s / 2, top, s, s * 0.85);                   // caja
+  ctx.fillStyle = '#ff3b57';
+  ctx.fillRect(cx - s * 0.09, top, s * 0.18, s * 0.85);         // cinta vertical
+  ctx.fillRect(cx - s / 2, cy + s * 0.04, s, s * 0.18);         // cinta horizontal
+  ctx.strokeStyle = '#ff3b57';
+  ctx.lineWidth = Math.max(2, s * 0.09);
+  ctx.beginPath();
+  ctx.arc(cx - s * 0.15, top - s * 0.1, s * 0.15, 0, Math.PI * 2);  // lazo
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx + s * 0.15, top - s * 0.1, s * 0.15, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// claro = true: calavera blanca (para fondo negro); false: calavera negra (para el punto blanco)
+function calavera(cx, cy, r, claro) {
+  const base = claro ? '#fff' : '#000';
+  const detalle = claro ? '#000' : '#fff';
+  ctx.fillStyle = base;
+  ctx.beginPath();
+  ctx.arc(cx, cy - r * 0.12, r * 0.62, 0, Math.PI * 2);
+  ctx.fill();
+  rectRedondo(cx - r * 0.32, cy + r * 0.2, r * 0.64, r * 0.42, r * 0.12);
+  ctx.fillStyle = detalle;
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.24, cy - r * 0.15, r * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx + r * 0.24, cy - r * 0.15, r * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + r * 0.02);
+  ctx.lineTo(cx - r * 0.08, cy + r * 0.18);
+  ctx.lineTo(cx + r * 0.08, cy + r * 0.18);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = detalle;
+  ctx.lineWidth = Math.max(1, r * 0.06);
+  ctx.beginPath();
+  for (let k = -1; k <= 1; k++) {
+    ctx.moveTo(cx + k * r * 0.14, cy + r * 0.3);
+    ctx.lineTo(cx + k * r * 0.14, cy + r * 0.58);
+  }
+  ctx.stroke();
+}
+
+function arana(cx, cy, r, claro, color) {
+  const base = color || (claro ? '#fff' : '#000');
+  ctx.fillStyle = base;
+  ctx.strokeStyle = base;
+  ctx.lineWidth = Math.max(1.5, r * 0.1);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const patas = [[-0.15, 0.5, -0.55, 0.9, -0.75], [-0.05, 0.6, -0.2, 1.0, -0.2],
+                 [0.05, 0.6, 0.1, 0.95, 0.35], [0.15, 0.45, 0.35, 0.7, 0.85]];
+  ctx.beginPath();
+  for (let s = -1; s <= 1; s += 2) {
+    patas.forEach((p) => {
+      ctx.moveTo(cx + s * r * 0.1, cy + p[0] * r);
+      ctx.lineTo(cx + s * p[1] * r, cy + p[2] * r);
+      ctx.lineTo(cx + s * p[3] * r, cy + p[4] * r);
+    });
+  }
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.14, r * 0.3, r * 0.38, 0, 0, Math.PI * 2); // abdomen
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy - r * 0.3, r * 0.2, 0, Math.PI * 2);                   // cabeza
+  ctx.fill();
+}
+
+function formaLlama(cx, cy, w, h, inc) {
+  const px = cx + inc * w, py = cy - h;
+  ctx.beginPath();
+  ctx.moveTo(cx - w, cy);
+  ctx.bezierCurveTo(cx - w, cy - h * 0.3, px - w * 0.4, py + h * 0.2, px, py);
+  ctx.bezierCurveTo(px + w * 0.4, py + h * 0.2, cx + w, cy - h * 0.3, cx + w, cy);
+  ctx.quadraticCurveTo(cx, cy + w * 0.4, cx - w, cy);
+  ctx.closePath();
+}
+
+function turbulencia(t, v, f) {
+  return 0.55 * Math.sin(t * v + f) + 0.3 * Math.sin(t * v * 2.3 + f * 1.7) + 0.15 * Math.sin(t * v * 4.7 + f * 0.4);
+}
+
+function crearLlamas() {
+  const l = [];
+  for (let i = 0; i < 20; i++) {
+    l.push({
+      fx: 0.04 + Math.random() * 0.92, fy: 0.08 + Math.random() * 0.84,
+      grande: Math.random() < 0.4, tam: 0.65 + Math.random() * 0.7,
+      f1: Math.random() * 6.28, v1: 0.016 + Math.random() * 0.026,
+      f2: Math.random() * 6.28, v2: 0.018 + Math.random() * 0.03,
+      f3: Math.random() * 6.28, v3: 0.014 + Math.random() * 0.024
+    });
+  }
+  return l;
+}
+
+function dibujarLlamas(b) {
+  const t = performance.now();
+  const q = 1 - b.arde / DURACION_ARDER;
+  const fac = q > 0.85 ? 1 - (q - 0.85) / 0.15 : 1; // se apagan al final
+  const L = Math.max(b.w, b.h);                      // escala por el lado largo
+  const gx = b.x + b.w / 2, gy = b.y + b.h * 0.4, gr = L * 1.1 * fac;
+  if (gr > 1) {
+    const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+    g.addColorStop(0, 'rgba(255,100,0,' + 0.28 * fac + ')');
+    g.addColorStop(0.5, 'rgba(180,40,0,' + 0.12 * fac + ')');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(gx, gy, gr, gr * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  b.llamas.forEach((a) => {
+    const fx = b.x + b.w * a.fx, fy = b.y + b.h * a.fy;
+    const h = Math.max(0, L * (a.grande ? 0.85 : 0.45) * a.tam * 0.7 * fac * (1 + turbulencia(t, a.v1, a.f1) * 0.34));
+    const w = Math.max(0, L * (a.grande ? 0.18 : 0.10) * a.tam * 0.7 * fac * (1 + turbulencia(t, a.v2, a.f2) * 0.4));
+    const al = (a.grande ? 0.95 : 0.78) * fac;
+    formaLlama(fx, fy, w, h, turbulencia(t, a.v3, a.f3) * 0.6);
+    const g = ctx.createLinearGradient(fx, fy - h, fx, fy);
+    g.addColorStop(0, 'rgba(255,255,210,' + al + ')');
+    g.addColorStop(0.2, 'rgba(255,240,60,' + al + ')');
+    g.addColorStop(0.5, 'rgba(255,120,10,' + al * 0.95 + ')');
+    g.addColorStop(0.78, 'rgba(210,30,5,' + al * 0.7 + ')');
+    g.addColorStop(1, 'rgba(100,8,0,0)');
+    ctx.fillStyle = g;
+    ctx.fill();
+  });
+  for (let i = 0; i < 8; i++) { // brasas
+    const s = b.semilla + i * 17.3 + 200;
+    const k = Math.sin(t * 0.008 + s) * 0.5 + 0.5;
+    ctx.fillStyle = 'rgba(' + Math.round(200 + 55 * k) + ',' + Math.round(50 + 100 * k) + ',0,' + k * fac * 0.95 + ')';
+    ctx.beginPath();
+    ctx.arc(b.x + b.w * (0.08 + 0.84 * i / 7), b.y + Math.sin(s) * 3, (2.2 + k * 1.5) * fac, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function iconoFuego(cx, cy, r) {
+  const X = (u) => cx + u * r, Y = (v) => cy + v * r;
+  ctx.beginPath();
+  ctx.moveTo(X(0), Y(0.85));
+  ctx.bezierCurveTo(X(-0.5), Y(0.85), X(-0.78), Y(0.5), X(-0.72), Y(0.1));
+  ctx.quadraticCurveTo(X(-0.7), Y(-0.2), X(-0.5), Y(-0.5));
+  ctx.quadraticCurveTo(X(-0.45), Y(-0.25), X(-0.3), Y(-0.1));
+  ctx.quadraticCurveTo(X(-0.4), Y(-0.55), X(-0.15), Y(-0.95));
+  ctx.quadraticCurveTo(X(-0.1), Y(-0.6), X(0.05), Y(-0.3));
+  ctx.quadraticCurveTo(X(0), Y(-0.7), X(0.3), Y(-1));
+  ctx.quadraticCurveTo(X(0.3), Y(-0.55), X(0.38), Y(-0.15));
+  ctx.quadraticCurveTo(X(0.5), Y(-0.35), X(0.6), Y(-0.6));
+  ctx.quadraticCurveTo(X(0.85), Y(-0.2), X(0.74), Y(0.2));
+  ctx.bezierCurveTo(X(0.7), Y(0.6), X(0.45), Y(0.85), X(0), Y(0.85));
+  ctx.closePath();
+  const g = ctx.createLinearGradient(cx, Y(-1), cx, Y(0.85));
+  g.addColorStop(0, '#ffd23f');
+  g.addColorStop(0.45, '#ff8a1a');
+  g.addColorStop(1, '#d62a05');
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(X(0), Y(0.8));
+  ctx.bezierCurveTo(X(-0.32), Y(0.8), X(-0.46), Y(0.55), X(-0.38), Y(0.25));
+  ctx.quadraticCurveTo(X(-0.34), Y(0), X(-0.14), Y(-0.3));
+  ctx.quadraticCurveTo(X(-0.12), Y(-0.1), X(-0.02), Y(0));
+  ctx.quadraticCurveTo(X(0), Y(-0.25), X(0.14), Y(-0.5));
+  ctx.quadraticCurveTo(X(0.2), Y(-0.2), X(0.3), Y(0.05));
+  ctx.quadraticCurveTo(X(0.45), Y(0.3), X(0.36), Y(0.5));
+  ctx.bezierCurveTo(X(0.3), Y(0.68), X(0.2), Y(0.8), X(0), Y(0.8));
+  ctx.closePath();
+  const g2 = ctx.createLinearGradient(cx, Y(-0.5), cx, Y(0.8));
+  g2.addColorStop(0, '#fffbd0');
+  g2.addColorStop(1, '#ffc02e');
+  ctx.fillStyle = g2;
+  ctx.fill();
+}
+
+function dibujarBolaFuego(f) {
+  const t = performance.now();
+  f.estela.forEach((p, i) => {
+    const k = i / f.estela.length;
+    ctx.globalAlpha = k * 0.55;
+    ctx.fillStyle = 'rgba(255,' + Math.round(80 + 100 * k) + ',0,1)';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, R_FUEGO * k * 0.85, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  const fl = 0.85 + 0.15 * Math.sin(t * 0.05);
+  const g = ctx.createRadialGradient(f.x - R_FUEGO * 0.3, f.y - R_FUEGO * 0.35, 0, f.x, f.y, R_FUEGO);
+  g.addColorStop(0, 'rgba(255,255,200,' + fl + ')');
+  g.addColorStop(0.3, 'rgba(255,180,20,' + fl + ')');
+  g.addColorStop(0.65, 'rgba(230,50,0,' + fl * 0.9 + ')');
+  g.addColorStop(1, 'rgba(80,5,0,0.8)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(f.x, f.y, R_FUEGO, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.save(); // llamas hacia atrás respecto al vuelo
+  ctx.translate(f.x, f.y);
+  ctx.rotate(f.a - Math.PI / 2);
+  for (let i = 0; i < 3; i++) {
+    const s = i * 4.1 + t * 0.007;
+    const fx = Math.sin(s) * R_FUEGO * 0.5;
+    const w = R_FUEGO * 0.55 * (0.6 + Math.sin(s) * 0.3);
+    const h = R_FUEGO * 1.6 * (0.7 + Math.sin(s + 2) * 0.3);
+    formaLlama(fx, -R_FUEGO, w, h, Math.sin(s + 1) * 0.4);
+    const g2 = ctx.createLinearGradient(fx, -R_FUEGO - h, fx, -R_FUEGO);
+    g2.addColorStop(0, 'rgba(255,255,180,0.9)');
+    g2.addColorStop(0.4, 'rgba(255,160,20,0.8)');
+    g2.addColorStop(1, 'rgba(200,40,0,0)');
+    ctx.fillStyle = g2;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function geometriaMarcador() {
+  if (hud.modo === 'arriba') {
+    const sw = (hud.w * 0.94) / 3;
+    const s = clamp(Math.min(hud.h * 0.45, S * 0.045), 12, 40);
+    const x0 = hud.x + hud.w * 0.03;
+    return {
+      s: s, sw: sw, fs: Math.min(s, sw / 6.5),
+      pos: (i) => ({ x: x0 + (i + 0.5) * sw, y: hud.h / 2 })
+    };
+  }
+  const sw = hud.w * 0.9;
+  const fila = Math.min(hud.h / 6, S * 0.12);
+  const s = clamp(Math.min(S * 0.045, fila * 0.5), 12, 40);
+  return {
+    s: s, sw: sw, fs: Math.min(s, sw / 6.5),
+    pos: (i) => ({ x: hud.x + hud.w / 2, y: hud.h / 2 + (i - 1) * fila })
+  };
+}
+
+function dibujarVidas() {
+  const g = geometriaMarcador();
+  const c = g.pos(2);
+  const n = Math.max(vidas, 1);
+  const sp = Math.min(g.s * 1.4, g.sw / n);
+  const hs = Math.min(g.s, sp / 1.15);
+  for (let i = 0; i < vidas; i++) {
+    corazon(c.x + (i - (vidas - 1) / 2) * sp, c.y, hs, true);
+  }
+}
+
+function dibujarDatos() {
+  const g = geometriaMarcador();
+  const min = Math.floor(tiempo / 60);
+  const seg = Math.floor(tiempo % 60);
+  const textos = [
+    (min < 10 ? '0' : '') + min + ':' + (seg < 10 ? '0' : '') + seg,
+    Math.round(KMH_INICIO * V / V_BASE) + ' km/h'
+  ];
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + g.fs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < textos.length; i++) {
+    const p = g.pos(i);
+    ctx.fillText(textos[i], p.x, p.y);
+  }
+}
+
+function dibujarMensaje(l1, l2) {
+  const tam = Math.max(16, S * 0.055);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.font = 'bold ' + tam + 'px sans-serif';
+  ctx.lineWidth = tam * 0.2;
+  ctx.strokeStyle = '#000';
+  ctx.fillStyle = '#fff';
+  const x = ox + S / 2, y = oy + S * 0.3;
+  ctx.strokeText(l1, x, y);
+  ctx.fillText(l1, x, y);
+  ctx.font = (tam * 0.6) + 'px sans-serif';
+  ctx.lineWidth = tam * 0.14;
+  ctx.strokeText(l2, x, y + tam * 1.1);
+  ctx.fillText(l2, x, y + tam * 1.1);
+}
+
+function dibujarAviso() {
+  if (!aviso) return;
+  const tam = Math.max(14, S * 0.042);
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, aviso.vida / 0.5); // se desvanece en el último medio segundo
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.font = 'bold ' + tam + 'px sans-serif';
+  ctx.lineWidth = tam * 0.2;
+  ctx.strokeStyle = '#000';
+  ctx.fillStyle = aviso.color;
+  const x = ox + S / 2, y = oy + S * 0.72;
+  ctx.strokeText(aviso.texto, x, y);
+  ctx.fillText(aviso.texto, x, y);
+  ctx.restore();
+}
+
+function dibujar() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(esc, esc);
+
+  // Borde del círculo
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 2 / esc;
+  ctx.beginPath();
+  ctx.arc(CX, CY, R_EXT - 1 / esc, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Ladrillos
+  const g = 3;
+  ladrillos.forEach((b) => {
+    if (!b.vivo) {
+      if (b.muerte > 0) {
+        ctx.globalAlpha = Math.min(1, b.muerte / 0.6);
+        ctx.fillStyle = '#ff3b57';
+        trazarSector(R_IN, R_OUT, b.a0, b.a1, g);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      return;
+    }
+    const q = b.arde ? 1 - b.arde / DURACION_ARDER : 0;
+    ctx.fillStyle = 'hsl(' + b.hue + ',' + (85 - 60 * q) + '%,' + (55 - 38 * q) + '%)';
+    trazarSector(R_IN, R_OUT, b.a0, b.a1, g);
+    ctx.fill();
+    if (b.flash > 0) {
+      ctx.globalAlpha = Math.min(1, b.flash / 0.6);
+      ctx.fillStyle = '#fff';
+      trazarSector(R_IN, R_OUT, b.a0, b.a1, g);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  });
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(CX, CY, R_EXT, 0, Math.PI * 2);
+  ctx.clip();
+  ladrillos.forEach((b) => { if (b.vivo && b.arde) dibujarLlamas(b); });
+  ctx.restore();
+
+  // Punto central
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(CX, CY, R_PUNTO, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Calavera / araña / fuego cogidos: se quedan en el centro hasta que la bola lo toque
+  if (calaveraCentro) {
+    ctx.strokeStyle = '#ff3b57';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(CX, CY, R_PUNTO + 3, 0, Math.PI * 2);
+    ctx.stroke();
+    calavera(CX, CY, R_PUNTO, false);
+  }
+  if (aranaCentro) {
+    ctx.strokeStyle = '#b57bff';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(CX, CY, R_PUNTO + 3, 0, Math.PI * 2);
+    ctx.stroke();
+    arana(CX, CY, R_PUNTO, false);
+  }
+  if (fuegoCentro) {
+    ctx.strokeStyle = '#ff7a1a';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(CX, CY, R_PUNTO + 3, 0, Math.PI * 2);
+    ctx.stroke();
+    iconoFuego(CX, CY, R_PUNTO * 0.8);
+  }
+
+  // Paleta (arco con extremos redondeados)
+  {
+    const p = paleta();
+    const cap = (PH / 2) / RP;
+    ctx.strokeStyle = p.dano ? '#ff8a8a' : '#fff';
+    ctx.lineWidth = PH;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(CX, CY, RP, p.a0 + cap, p.a1 - cap);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+  }
+
+  // Bola
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(bx, by, R_BOLA, 0, Math.PI * 2);
+  ctx.fill();
+
+  bolasFuego.forEach(dibujarBolaFuego);
+
+  // Objetos en vuelo
+  corazonesVida.forEach((h) => {
+    if (h.tipo === 'calavera') calavera(h.x, h.y, 20, true);
+    else if (h.tipo === 'arana') arana(h.x, h.y, 20, true);
+    else if (h.tipo === 'regalo') regalo(h.x, h.y, 32);
+    else if (h.tipo === 'fuego') iconoFuego(h.x, h.y, 20);
+    else corazon(h.x, h.y, 34, true);
+  });
+
+  aranas.forEach((a) => arana(a.x, a.y, R_ARANA * 1.2, true, '#b57bff'));
+
+  // Rayo (atraviesa la paleta sin afectarla)
+  if (rayo) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX, CY, R_EXT, 0, Math.PI * 2);
+    ctx.clip();
+    const k = rayo.vida / DURACION_RAYO;
+    const a1 = rayo.a0 - SEMI_RAYO, a2 = rayo.a0 + SEMI_RAYO;
+    const grad = ctx.createRadialGradient(CX, CY, R_PUNTO, CX, CY, LARGO_RAYO);
+    const c0 = rayo.mortal ? '255, 210, 210' : '220, 255, 245';
+    const c1 = rayo.mortal ? '255, 40, 60' : '80, 255, 210';
+    grad.addColorStop(0, 'rgba(' + c0 + ', ' + (0.85 * k) + ')');
+    grad.addColorStop(1, 'rgba(' + c1 + ', ' + (0.25 * k) + ')');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(CX, CY);
+    ctx.arc(CX, CY, LARGO_RAYO, a1, a2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(' + c0 + ', ' + (0.9 * k) + ')';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.restore();
+
+  dibujarVidas();
+  dibujarDatos();
+  dibujarAviso();
+
+  if (estado === 'inicio') dibujarMensaje('Arkanoid redondo', 'Toca para empezar');
+  if (estado === 'fin') dibujarMensaje('Fin del juego', 'Toca para reiniciar');
+}
+
+// ---------- Arrastre relativo horizontal: 1/4 de pantalla = una vuelta entera, sin límites ----------
+let arrastrando = false;
+let inicioPuntero = 0;
+let inicioAng = 0;
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (estado === 'fin') reiniciar();
+  else if (estado === 'inicio') prepararBola();
+  arrastrando = true;
+  inicioPuntero = e.clientX;
+  inicioAng = ang;
+  canvas.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!arrastrando) return;
+  ang = inicioAng - (e.clientX - inicioPuntero) / (W * VUELTA_PANTALLA) * 2 * Math.PI;
+  e.preventDefault();
+});
+
+function soltar() { arrastrando = false; }
+canvas.addEventListener('pointerup', soltar);
+canvas.addEventListener('pointercancel', soltar);
+
+window.addEventListener('resize', ajustar);
+window.addEventListener('orientationchange', () => setTimeout(ajustar, 100));
+
+// ---------- Bucle ----------
+let ultimo = 0;
+function bucle(t) {
+  const dt = Math.min(0.033, (t - ultimo) / 1000 || 0);
+  ultimo = t;
+  actualizar(dt);
+  dibujar();
+  requestAnimationFrame(bucle);
+}
+
+ajustar();
+reiniciar();
+estado = 'inicio'; // espera un toque para empezar
+requestAnimationFrame(bucle);
+</script>
+</body>
+</html>
